@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"time"
 	"fmt"
 	"log"
 	"net"
@@ -11,133 +12,228 @@ import (
 	"errors"
 )
 
-// 放在队列里面，
-type TaskNode struct {
-	WorkerId int
-	Filename string
+// 定义接口
+type TaskInterface interface{
+	// 任务会不会超时
+	isExpired() bool // check if the task is out of time
+	
+	setNow() // set the startTime now
+
+	GenerateTaskInfo() TaskInfo
+	setState(state TaskState)
+	IndexNumber() int
 }
+
+type TaskState int32
+
+const (
+	TaskStateIdle TaskState = 1 // 未分配
+	TaskStateRunning TaskState = 2 // 已经分配
+	TaskStateFinished TaskState = 3 // 运行结束
+
+	TaskExpiredTime time.Duration = time.Second*10 //
+)
+
+type Task struct{
+	StartTime time.Time // start time
+	InputFileName string// input file name
+	TaskIndexNumber int // 
+	State TaskState // task state: idle | running(assigned) | finished
+	Type AssignedTaskType
+	TaskId int // Identifier
+	NReduce int
+	NFile int
+
+}
+
+// 2 types of worker task: Map & Reduce
+type MapTask struct{
+	Task
+}
+
+type ReduceTask struct{
+	Task
+}
+
+// Implement task interface
+func (mt *MapTask) GenerateTaskInfo() TaskInfo {
+	return TaskInfo{
+		TaskType: TaskTypeMap,
+		File: mt.InputFileName,
+		Id: mt.TaskIndexNumber,
+		NReduce: mt.NReduce,
+	}
+}
+
+func (rt *ReduceTask) GenerateTaskInfo() TaskInfo{
+	return TaskInfo{
+		// 🤔
+		TaskType: TaskTypeReduce,
+		//File: rt.InputFileName, // 但是对应了很多y， 意思是肯定有这么多个y是吗		
+		Id: rt.TaskIndexNumber,
+		NFile: rt.NFile,
+	}
+}
+
+func (t *Task) setNow() {
+	t.StartTime = time.Now()
+}
+
+func (t *Task) isExpired() bool {
+	since := time.Since(t.StartTime)
+	return since > TaskExpiredTime
+}
+
+func (t *Task) setState(state TaskState) {
+	t.State = state
+}
+
+func (t *Task) IndexNumber() int {
+	return t.TaskIndexNumber
+}
+
+type TaskQueue struct{
+	taskArray []TaskInterface
+	mutex sync.Mutex
+}
+
+func (queue *TaskQueue) Lock() {
+	queue.mutex.Lock()
+}
+
+func (queue *TaskQueue) Unlock() {
+	queue.mutex.Unlock()
+}
+
+func (queue *TaskQueue) Pop() TaskInterface{
+	queue.Lock()
+	
+	defer queue.Unlock()
+
+	if len(queue.taskArray) == 0{
+		return nil
+	}
+
+	var task = queue.taskArray[0]
+	queue.taskArray = queue.taskArray[1:] // 出队
+	return task
+}
+
+func (queue *TaskQueue) Push(task TaskInterface){
+	queue.Lock()
+	defer queue.Unlock()
+	
+	queue.taskArray = append(queue.taskArray, task) // 入队
+}
+
+func (queue *TaskQueue) RemoveTask(indexNumber int) (TaskInterface, error) {
+	queue.Lock()
+	defer queue.Unlock()
+
+	// TBD
+	for idx := 0; idx < len(queue.taskArray); idx++ {
+		task := queue.taskArray[idx]
+		if indexNumber == task.IndexNumber() {
+			queue.taskArray = append(queue.taskArray[:idx], queue.taskArray[idx+1:]...)
+			return task, nil
+		}
+	}
+	return nil, errors.New("Task Not found")
+}
+
+func (queue *TaskQueue) Size() int {
+	return len(queue.taskArray)
+}
+
+type CoordinatorPhase int32
+
+const (
+	Mapping CoordinatorPhase = 1
+	Reducing CoordinatorPhase = 2
+	Done CoordinatorPhase = 3
+)
 
 type Coordinator struct {
 	// Your definitions here.
-	nReduce int
-	nMap int
-	files []string
-	finished bool
+	NReduce int
+	Files []string
+	Phase CoordinatorPhase// 当前 Coordinator正在Map 还是 正在 Reduce
 
-	// 等待Map的队列，存放文件名称
-	queue1 []string
-	// 等待Reduce的队列，存放中间文件名称
-	queue2 []string
-	
-	// 当前正在进行的 worker， 用 Map 结构会好点
-	MapWorkerList map[int]string
-	ReduceWorkerList map[int]string
-
-	// 锁
-	mutex sync.Mutex
+	// Map 任务队列
+	MapWaitingQueue TaskQueue
+	MapRunningQuue TaskQueue
+	// Reduce 任务队列
+	ReduceWaitingQueue TaskQueue
+	ReduceRunningQueue TaskQueue
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-//
-// an example RPC handler.
-//
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+
+// Worker use the rpc method
+func (c *Coordinator) AskForTask(args *EmptyArg, reply *TaskInfo) error {
+	switch c.Phase{
+	case Mapping:
+		// 分配Map 任务，或者不分配任务。WaitingQueue 是空的，就分配一个TaskWait
+		// c.MapWaitingQueue.Lock() 不在这里加锁，在函数内部加锁
+		task := c.MapWaitingQueue.Pop()
+		if task != nil { // 
+			task.setNow()
+			// task.setState(TaskStateRunning) // 目前这个没什么用
+			c.MapRunningQuue.Push(task)
+			*reply = task.GenerateTaskInfo() // 地址指向的对象 重新赋值
+			return nil
+		}
+		// 没有mapping 任务
+		*reply = TaskInfo{
+			TaskType: TaskTypeWait,
+		}
+	case Reducing:
+		task := c.ReduceWaitingQueue.Pop()
+		if task != nil{
+			task.setNow()
+			c.ReduceRunningQueue.Push(task)
+			*reply = task.GenerateTaskInfo() // 多态
+			return nil
+		}
+		*reply = TaskInfo{
+			TaskType: TaskTypeWait,
+		}
+	case Done:
+		*reply = TaskInfo{
+			TaskType: TaskTypeExit,
+		}
+		return nil
+	}
 	return nil
 }
 
-func (c *Coordinator) Task(args *WorkRequestArgs, reply *WorkReply) error {
-	//runs the handler for each RPC in its own thread. There has data race with the `Done()` method.
-	// the worker ask for a task to process
-	// Assign map task
-	if len(c.queue1) > 0 {
-		c.mutex.Lock()
-
-		reply.Code = 1
-		// Map 任务
-		reply.WorkType = 1
+func (c *Coordinator) TaskFinishAck(info* TaskInfo, reply* EmptyArg) error{ // 也要返回error，查看是否有这个task，没有就丢弃这个消息
+	// TBD 有可能在 Reducing 阶段 收到 Map Task的 完成消息
+	switch info.TaskType{
+	case TaskTypeMap:
 		
-		// 给任务
-		filename := c.queue1[0]
-		// 分配
-		reply.Filename = filename
+		_, error := c.MapRunningQuue.RemoveTask(info.Id)
+		if error != nil{
+			return errors.New(TaskNotFoundErrMsg(info.Id))
+		}
 
-		reply.nReduce = 10
+		if c.MapWaitingQueue.Size() == 0 && c.MapRunningQuue.Size() == 0 {
+			c.RegisterReduceTasks()
+			c.Phase = Reducing
+		}
+	case TaskTypeReduce:
+		_, error := c.ReduceRunningQueue.RemoveTask(info.Id)
+		if error != nil{
+			return errors.New(TaskNotFoundErrMsg(info.Id))
+		}
 
-		// 调整coordinator的状态
-		// queue1 队列出队
-		c.queue1 = c.queue1[1:len(c.queue1)]
-		c.MapWorkerList[args.WorkerId] = filename
-
-		c.mutex.Unlock()
-
-	} else if len(c.MapWorkerList) > 0 {
-		// 没有文件要读取，而 Map也还没有执行完成
-		reply.Code = 0
-	}else if len(c.MapWorkerList) == 0 && len(c.queue2) > 0{ // Map work完全结束
-		reply.Code = 1
-		// Reduce 任务
-		reply.WorkType = 2
-		c.mutex.Lock()
-		// 给任务
-		filename := c.queue2[0]
-		// 分配
-		reply.Filename = filename
-
-		// 调整coordinator的状态
-		// queue2 队列出队
-		c.queue2 = c.queue2[1:len(c.queue2)]
-		c.ReduceWorkerList[args.WorkerId] = filename
-
-		c.mutex.Unlock()
-	} else if len(c.ReduceWorkerList) > 0{
-		// queue1 queue2 为空， 但是 reduce任务还没结束
-		reply.Code = 0
-	} else {
-		// 全部结束了，告诉worker可以退出
-		reply.Code = -1
+		if c.ReduceWaitingQueue.Size() == 0 && c.ReduceRunningQueue.Size() == 0 {
+			c.Phase = Done
+		}
 	}
-
-	return nil;
-}
-
-func (c *Coordinator) TaskFinish(args *NoticeCoorninatorArg, reply *NoticeCoorninatorReply ) error {
-
-	workerId := args.WorkerId
-	// Task Type
-	workType := args.WorkType
-
-	if workType == 0 {
-		// Map 结束
-		if _, ok := c.MapWorkerList[workerId] ; ok == false {
-			// 不存在
-			return errors.New(workeridNotFoundErrMsg(workerId))
-		}
-		if args.Filename != c.MapWorkerList[workerId] {
-			return errors.New("Wrong file name")
-		}
-		// 存在
-		c.mutex.Lock()
-		delete(c.MapWorkerList, workerId)
-		c.mutex.Unlock()
-	} else if workType == 1{
-		// Reduce 任务结束
-		if _, ok := c.ReduceWorkerList[workerId] ; ok == false {
-			// 不存在
-			return errors.New(workeridNotFoundErrMsg(workerId))
-		}
-		// 存在
-		if args.Filename != c.ReduceWorkerList[workerId] {
-			return errors.New("Wrong file name")
-		}
-		c.mutex.Lock()
-		delete(c.ReduceWorkerList, workerId)
-		c.mutex.Unlock()
-	}
-	
 	return nil
 }
 
@@ -149,6 +245,7 @@ func (c *Coordinator) server() {
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
 	sockname := coordinatorSock()
+	fmt.Printf("listen to socket: %v\n", sockname)
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
@@ -166,38 +263,66 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 	// 这里有数据竞争 data race
-	ret = c.finished
-
-	return ret
+	return c.Phase == Done
 }
 
+func (c *Coordinator) RegisterReduceTasks() {
+	// if all the map tasks are done, start assigning reduce tasks
+	taskTemp := ReduceTask{
+		Task{
+			NFile: len(c.Files),
+			NReduce: c.NReduce,
+		},
+	}
+	for idx := 0; idx < c.NReduce; idx++ {
+		reduceTask := taskTemp
+		reduceTask.TaskIndexNumber = idx
+		c.ReduceWaitingQueue.Push(&reduceTask)
+	}
+}
 //
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-	c.nReduce = nReduce
-	c.nMap = len(files)
-	c.files = files
-	c.finished = false
+	
+	// 根据files 生成队列
+	mapTaskArray := make([]TaskInterface, 0) // 这里的初始化类型记住也许需要改动， 不知道应该写TaskInterface还是 Task, 决定应该写 TaskInterface
+	for idx, fileName := range files {
+		maptask := MapTask{
+			Task{
+				InputFileName: fileName,
+				TaskIndexNumber: idx,
+				State: TaskStateIdle,
+				Type: TaskTypeMap,
+				TaskId: 0, // taskid 在分配的时候再赋值？ 如何分配这个 taskId，uuid？
+				NReduce: nReduce,
+			},
+		}
+		mapTaskArray = append(mapTaskArray, &maptask)
+	}
+	
+	c := Coordinator{
+		// 指定Reduce Task 数量
+		NReduce : nReduce,
+		// 输入了哪些文件
+		Files : files,
+		// 初始化状态，正在执行Map阶段
+		Phase : Mapping,
+		// Map 任务等待分配队列
+		MapWaitingQueue: TaskQueue{taskArray: mapTaskArray},
+	}
+
 	// Your code here.
 
-	// load queue1 and queue2, now queue2 is empty
-	c.queue1 = append(c.queue1, c.files...)
-	fmt.Printf("queue1: \n")
-	for i:=0; i < len(c.queue1); i++ {
-		fmt.Println(c.queue1[i])
-	}
-	c.MapWorkerList = map[int]string{}
-	c.ReduceWorkerList = map[int]string{}
-	fmt.Printf("queue2: \n")
-	for i:=0; i < nReduce; i++ {
-		c.queue2 = append(c.queue2, intermediateFileName(i))
-		fmt.Println(intermediateFileName(i))
-	}
+	// start a thread to requeue the out of time running task
+	
 	// 开启 rpc
 	c.server()
+
+	// 启动另一个线程 检查执行中的超时任务
+	// TBD
+
 	return &c
 }

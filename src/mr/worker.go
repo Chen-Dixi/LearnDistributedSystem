@@ -2,14 +2,10 @@ package mr
 
 import (
 	"os"
-	"time"
 	"fmt"
 	"log"
 	"net/rpc"
 	"hash/fnv"
-	"io/ioutil"
-	"sort"
-	"encoding/json"
 )
 
 
@@ -48,152 +44,14 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 	
-	// 
-	workerId := os.Getuid()
 	// there is a loop inside the `CallTask` funciton
-	CallTask(workerId, mapf, reducef)
-
-}
-
-func CallTask(workerId int, mapf func(string, string) []KeyValue,
-reducef func(string, []string) string) {
-
-	for true {
-		args := WorkRequestArgs{}
-		args.WorkerId = workerId
-
-		reply := WorkReply{}
-
-		response := call("Coordinator.Task", &args, &reply) 
-		
-		if response == false || reply.Code == 0{
-			// sleep 一下
-			time.Sleep(time.Second)
-			// 开始下一侧 request
-			continue
-		}
-
-		// response == true
-		if(reply.Code == -1){
-			// All task have finished, exit the worker process
-			break;
-		}
-
-		// Check if it is Map or Reduce Task
-		if reply.WorkType == 1 {
-			// Map Task
-			MapTask(workerId, &reply, mapf)
-		}else if reply.WorkType == 2{
-			// Reduce Task
-			ReduceTask(workerId, &reply, reducef)
-		}
-	}
-}
-
-func MapTask(workerId int, reply *WorkReply, mapf func(string, string) []KeyValue) {
-	intermediate := []KeyValue{}
-	filename := reply.Filename
-	fmt.Printf("workerId: %d\n", workerId)
-	fmt.Printf("file: %v\n", filename)
-
-
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("cannot open %v", filename)
-	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-	}
-	file.Close()
-	kva := mapf(filename, string(content))
-	intermediate = append(intermediate, kva...)
-
-	sort.Sort(ByKey(intermediate))
-
-	i := 0
-	for i < len(intermediate) {
-		key := intermediate[i].Key
-		fmt.Println("key: "+key)
-		fmt.Printf("hash: %d\n ", ihash(key))
-		fmt.Printf("nReduce: %d\n ", reply.nReduce)
-		reduceNo := ihash(key) % 10
-		oname := intermediateFileName(reduceNo)
-		ofile, _ := os.OpenFile(oname, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		enc := json.NewEncoder(ofile)
-		j := i + 1
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			j++
-		}
-		for k := i; k<j; k++{
-			enc.Encode(intermediate[k])
-		}
-		ofile.Close()
-		i = j
-	}
-	// 写完了
-	noticeArg := NoticeCoorninatorArg{}
-	noticeArg.Filename = reply.Filename
-	noticeArg.WorkerId = workerId
-	noticeArg.WorkType = 0
-
-	noticeReply := NoticeCoorninatorReply{}
-
-	call("Coordinator.TaskFinish", noticeArg, noticeReply)
-}
-
-func ReduceTask(workerId int, reply *WorkReply, reducef func(string, []string) string) {
-	intermediateFileName := reply.Filename
-	ifile, _ := os.OpenFile(intermediateFileName, os.O_RDONLY, 0755)
-	intermediate := []KeyValue{}
-
-	dec := json.NewDecoder(ifile)
-	for {
-		var kv KeyValue
-		if err := dec.Decode(&kv); err != nil {
-			break
-		}
-		intermediate = append(intermediate, kv)
-	}
-
-	sort.Sort(ByKey(intermediate))
 	
-	oname := intermediateFileName + "-out"
-	ofile, _ := os.Create(oname)
-
-	//
-	// call Reduce on each distinct key in intermediate[],
-	// and print the result to mr-out-0.
-	//
-	i := 0
-	for i < len(intermediate) {
-		j := i + 1
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			j++
-		}
-		values := []string{}
-		for k := i; k < j; k++ {
-			values = append(values, intermediate[k].Value)
-		}
-		output := reducef(intermediate[i].Key, values)
-
-		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-
-		i = j
-	}
-
-	ofile.Close()
-	// 写完了
-	noticeArg := NoticeCoorninatorArg{}
-	noticeArg.Filename = reply.Filename
-	noticeArg.WorkerId = workerId
-	noticeArg.WorkType = 1
-
-	noticeReply := NoticeCoorninatorReply{}
-
-	call("Coordinator.TaskFinish", noticeArg, noticeReply)
 }
+
+func MapTask(mapf func(string, string) []KeyValue) {
+	
+}
+
 //
 // example function to show how to make an RPC call to the coordinator.
 //

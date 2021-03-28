@@ -22,47 +22,38 @@ type ExampleReply struct {
 	Y int
 }
 
+// 这里会定义很多状态
+type AssignedTaskType int32
 
+// 枚举就是const
+// const 模拟枚举
+// Don't use magic number
+const (
+	TaskTypeMap AssignedTaskType = 1
+	TaskTypeReduce AssignedTaskType = 2
+	TaskTypeWait	AssignedTaskType = 3
+	TaskTypeExit AssignedTaskType = 4
+)
+
+// 请求不需要传递任何信息
+type EmptyArg struct {
+}
+
+// TaskInfo is the message passed from coordinator to worker as "Reply"
+type TaskInfo struct{
+	// 本次Task的处理方式
+	TaskType AssignedTaskType
+	// 文本的名字
+	File string
+	Id int
+	// 分成几个 Reduce Task
+	NReduce int
+	// 最开始有多少个输入
+	NFile int
+}
 
 // Add your RPC definitions here.
-type WorkRequestArgs struct{
-	WorkerId int
 
-}
-
-type WorkReply struct{
-	// 是否派遣任务 0: 无任务, 1: Map, or Reduce, 通过WorkType判断 -1: 全部运行结束，让worker退出
-	Code int
-
-	// 任务类型， 0:Map or 1:Reduce
-	WorkType int
-	// nReduce
-	nReduce int
-	// 传送要读取的文件名称 filename
-	Filename string
-
-
-}
-
-type NoticeCoorninatorArg struct {
-	Finished bool
-	// Worker ID
-	WorkerId int
-	// Task Type
-	WorkType int
-
-	Filename string
-
-}
-
-type NoticeCoorninatorReply struct {
-	Finished bool
-	// Worker ID
-	WorkerId int
-	// Task Type
-	WorkType int
-
-}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
@@ -74,20 +65,8 @@ func coordinatorSock() string {
 	return s
 }
 
-func workeridNotFoundErrMsg(id int) string {
-	s := "Can not find worker: "
+func TaskNotFoundErrMsg(id int) string {
+	s := "Task not found, indexNumebr: "
 	s += strconv.Itoa(id)
-	return s
-}
-
-func intermediateFileName(reduce int) string {
-	s := "mr_"
-	s += strconv.Itoa(reduce)
-	return s
-}
-
-func reduceOutFileName(reduce int) string {
-	s := "mr-out-"
-	s += strconv.Itoa(reduce)
 	return s
 }
