@@ -8,7 +8,7 @@ package mr
 
 import "os"
 import "strconv"
-
+import "strings"
 //
 // example to show how to declare the arguments
 // and reply for an RPC.
@@ -69,4 +69,22 @@ func TaskNotFoundErrMsg(id int) string {
 	s := "Task not found, indexNumebr: "
 	s += strconv.Itoa(id)
 	return s
+}
+
+func MakeAddSuffix(suffix string) func(string) string {
+    return func(name string) string {
+        if !strings.HasSuffix(name, suffix) {
+        		return name + suffix
+        }
+        return name
+    }
+}
+
+func MakeAddPrefix(suffix string) func(string) string {
+    return func(name string) string {
+        if !strings.HasSuffix(name, suffix) {
+        		return suffix + name
+        }
+        return name
+    }
 }

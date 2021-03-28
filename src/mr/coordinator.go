@@ -16,9 +16,7 @@ import (
 type TaskInterface interface{
 	// 任务会不会超时
 	isExpired() bool // check if the task is out of time
-	
 	setNow() // set the startTime now
-
 	GenerateTaskInfo() TaskInfo
 	setState(state TaskState)
 	IndexNumber() int
@@ -130,7 +128,6 @@ func (queue *TaskQueue) RemoveTask(indexNumber int) (TaskInterface, error) {
 	queue.Lock()
 	defer queue.Unlock()
 
-	// TBD
 	for idx := 0; idx < len(queue.taskArray); idx++ {
 		task := queue.taskArray[idx]
 		if indexNumber == task.IndexNumber() {
@@ -161,12 +158,19 @@ type Coordinator struct {
 
 	// Map 任务队列
 	MapWaitingQueue TaskQueue
-	MapRunningQuue TaskQueue
+	MapRunningQueue TaskQueue
 	// Reduce 任务队列
 	ReduceWaitingQueue TaskQueue
 	ReduceRunningQueue TaskQueue
+
+	mutex sync.Mutex
 }
 
+func (c *Coordinator) SetPhase(phase CoordinatorPhase) {
+	c.mutex.Lock()
+	c.Phase = phase
+	c.mutex.Unlock()
+}
 // Your code here -- RPC handlers for the worker to call.
 
 // the RPC argument and reply types are defined in rpc.go.
@@ -174,6 +178,7 @@ type Coordinator struct {
 
 // Worker use the rpc method
 func (c *Coordinator) AskForTask(args *EmptyArg, reply *TaskInfo) error {
+	// TBD：控制台输出，分配了什么任务
 	switch c.Phase{
 	case Mapping:
 		// 分配Map 任务，或者不分配任务。WaitingQueue 是空的，就分配一个TaskWait
@@ -182,8 +187,9 @@ func (c *Coordinator) AskForTask(args *EmptyArg, reply *TaskInfo) error {
 		if task != nil { // 
 			task.setNow()
 			// task.setState(TaskStateRunning) // 目前这个没什么用
-			c.MapRunningQuue.Push(task)
+			c.MapRunningQueue.Push(task)
 			*reply = task.GenerateTaskInfo() // 地址指向的对象 重新赋值
+			fmt.Printf("Assign Map Task %v\n", reply.Id)
 			return nil
 		}
 		// 没有mapping 任务
@@ -196,6 +202,7 @@ func (c *Coordinator) AskForTask(args *EmptyArg, reply *TaskInfo) error {
 			task.setNow()
 			c.ReduceRunningQueue.Push(task)
 			*reply = task.GenerateTaskInfo() // 多态
+			fmt.Printf("Assign Reduce Task %v\n", reply.Id)
 			return nil
 		}
 		*reply = TaskInfo{
@@ -206,32 +213,36 @@ func (c *Coordinator) AskForTask(args *EmptyArg, reply *TaskInfo) error {
 			TaskType: TaskTypeExit,
 		}
 		return nil
+	default:
+		return errors.New("Strange Coordinator Phase")
 	}
 	return nil
 }
 
 func (c *Coordinator) TaskFinishAck(info* TaskInfo, reply* EmptyArg) error{ // 也要返回error，查看是否有这个task，没有就丢弃这个消息
 	// TBD 有可能在 Reducing 阶段 收到 Map Task的 完成消息
+	// TBD 控制台输出：什么任务完成了
 	switch info.TaskType{
 	case TaskTypeMap:
 		
-		_, error := c.MapRunningQuue.RemoveTask(info.Id)
+		_, error := c.MapRunningQueue.RemoveTask(info.Id)
 		if error != nil{
-			return errors.New(TaskNotFoundErrMsg(info.Id))
+			return errors.New(MakeAddPrefix("Map ")(TaskNotFoundErrMsg(info.Id)))
 		}
-
-		if c.MapWaitingQueue.Size() == 0 && c.MapRunningQuue.Size() == 0 {
+		fmt.Printf("Map Reduce Task %v\n", info.Id)
+		if c.MapWaitingQueue.Size() == 0 && c.MapRunningQueue.Size() == 0 {
 			c.RegisterReduceTasks()
-			c.Phase = Reducing
+			// 这里出现竞争
+			c.SetPhase(Reducing)
 		}
 	case TaskTypeReduce:
 		_, error := c.ReduceRunningQueue.RemoveTask(info.Id)
 		if error != nil{
-			return errors.New(TaskNotFoundErrMsg(info.Id))
+			return errors.New(MakeAddPrefix("Reduce ")(TaskNotFoundErrMsg(info.Id)))
 		}
-
+		fmt.Printf("Finish Reduce Task %v\n", info.Id)
 		if c.ReduceWaitingQueue.Size() == 0 && c.ReduceRunningQueue.Size() == 0 {
-			c.Phase = Done
+			c.SetPhase(Done)
 		}
 	}
 	return nil
@@ -259,10 +270,10 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
-
 	// Your code here.
 	// 这里有数据竞争 data race
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	return c.Phase == Done
 }
 
@@ -314,9 +325,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		MapWaitingQueue: TaskQueue{taskArray: mapTaskArray},
 	}
 
-	// Your code here.
+	if _, err := os.Stat("mr-tmp"); os.IsNotExist(err) {
+		err = os.Mkdir("mr-tmp", os.ModePerm)
+		if err != nil {
+			fmt.Printf("Create tmp directory failed... Error: %v\n", err)
+			panic("Create tmp directory failed...")
+		}
+	}
 
-	// start a thread to requeue the out of time running task
+	// TBD: start a thread to requeue the out of time running task
 	
 	// 开启 rpc
 	c.server()
