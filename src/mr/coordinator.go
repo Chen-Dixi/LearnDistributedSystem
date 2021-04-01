@@ -28,7 +28,6 @@ const (
 	TaskStateIdle TaskState = 1 // 未分配
 	TaskStateRunning TaskState = 2 // 已经分配
 	TaskStateFinished TaskState = 3 // 运行结束
-
 	TaskExpiredTime time.Duration = time.Second*10 //
 )
 
@@ -229,7 +228,7 @@ func (c *Coordinator) TaskFinishAck(info* TaskInfo, reply* EmptyArg) error{ // �
 		if error != nil{
 			return errors.New(MakeAddPrefix("Map ")(TaskNotFoundErrMsg(info.Id)))
 		}
-		fmt.Printf("Map Reduce Task %v\n", info.Id)
+		fmt.Printf("Finish Map Task %v\n", info.Id)
 		if c.MapWaitingQueue.Size() == 0 && c.MapRunningQueue.Size() == 0 {
 			c.RegisterReduceTasks()
 			// 这里出现竞争

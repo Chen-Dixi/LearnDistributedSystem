@@ -15,3 +15,17 @@
 
 ## Github 资料浏览
 [其它的一些资料](https://github.com/Anarion-zuo/AnBlogs)
+
+## Run
+
+在`src/main`路径 运行:
+```
+go build -race -buildmode=plugin ../mrapps/wc.go
+```
+```
+go run -race mrcoordinator.go pg-*.txt
+```
+
+```
+go run -race mrworker.go wc.so
+```
