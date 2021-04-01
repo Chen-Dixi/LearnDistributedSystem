@@ -26,6 +26,7 @@ go build -race -buildmode=plugin ../mrapps/wc.go
 go run -race mrcoordinator.go pg-*.txt
 ```
 
+之后多个worker可以并发执行，启动多个终端运行下面程序：
 ```
 go run -race mrworker.go wc.so
 ```
