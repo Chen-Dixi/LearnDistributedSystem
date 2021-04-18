@@ -78,6 +78,12 @@ type ClientEnd struct {
 	done    chan struct{} // closed when Network is cleaned up
 }
 
+type EmptyArg struct {
+}
+
+type EmptyReply struct {
+}
+
 // send an RPC, wait for the reply.
 // the return value indicates success; false means that
 // no reply was received from the server.
