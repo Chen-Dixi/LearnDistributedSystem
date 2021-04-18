@@ -16,7 +16,8 @@
 ## Github 资料浏览
 [其它的一些资料](https://github.com/Anarion-zuo/AnBlogs)
 
-## Run  
+## Lab1
+### Run  
 
 在`src/main`路径 运行:
 ```
@@ -32,3 +33,9 @@ go run -race mrworker.go wc.so
 ```
 
 `src/mr/`路径下为自己实现的代码
+
+## Lab2
+- [**Lab2A**](https://github.com/Chen-Dixi/MIT6.824/blob/2A/src/raft/raft.go)
+- **Lab2B**
+- **Lab2C**
+- **Lab2D**

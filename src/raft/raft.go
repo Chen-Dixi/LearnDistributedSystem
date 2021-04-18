@@ -55,11 +55,6 @@ type ApplyMsg struct {
 //
 // A Go object implementing a single Raft peer.
 //
-type VotedPeer struct{
-	candidateId int
-	term int
-}
-
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	cond	  *sync.Cond
