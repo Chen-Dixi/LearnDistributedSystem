@@ -53,11 +53,18 @@ type ApplyMsg struct {
 }
 
 //
+// Log Entry
+type Entry struct {	
+	Term	  int
+	Command   interface{}
+}
+
+//
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	cond	  *sync.Cond
+	cond	  *sync.Cond          // 
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -70,16 +77,21 @@ type Raft struct {
 	
 	// Persistent State
 	currentTerm int
-	votedFor int
-	// log[]
-
-	lastRpcTime time.Time
+	votedFor    int
+	// log []Entry
+	log		    []Entry
 	
-	// reset many times
-	electionTimeout time.Duration
 	// Volatile state on all servers
-
-	// Volatile state on leaders
+	commitIndex int // index of highest log entry known to be committed
+	lastApplied   int // index of highest log entry applied to state machine
+	
+	// Volatile state on leaders, reinitialized after election
+	nextIndex	[]int // for each server, index of the next log entry to send to that server
+	matchIndex	[]int // for each server, index of highest log entry known to be replicated on server
+	
+	// Timeout clock
+	lastRpcTime time.Time
+	electionTimeout time.Duration
 }
 
 // return currentTerm and whether this server
@@ -212,8 +224,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term int
-	CandidateId int
+	Term        	int
+	CandidateId 	int
+	LastLogIndex	int	// index of candidate's last log entry
+	LastLogTerm		int // term of candidate's last log entry
 }
 
 //
@@ -222,13 +236,17 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term int
+	Term        int
 	VoteGranted bool
 }
 
 type AppendEntriesArgs struct {
-	Term int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries		 []Entry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -401,11 +419,29 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
+	rf.mu.Lock()
+	index := len(rf.log)
+	term := rf.currentTerm
+	isLeader := rf.role == Leader
+	entry := Entry{
+		Term : term, // TBD. not sure. term or rf.currentTerm
+		Command : command,
+	}
+	rf.mu.Unlock()
+	
 	// Your code here (2B).
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	go func (command interface{}) {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		
+		// append entry to local log
+		rf.log = append(rf.log, entry)
+	} (command)
+
 	return index, term, isLeader
 }
 
@@ -422,14 +458,13 @@ func (rf *Raft) ticker() {
 		role := rf.role
 		rf.mu.Unlock()
 		if role == Leader {
-			time.Sleep(150*time.Millisecond) // Leader don't have to 
+			time.Sleep(150*time.Millisecond) // Leader don't have to check timeout
 			continue
 		}
 
 		if rf.IsElectionTimeout() {
 			rf.AttemptElection()
 		}
-		// Sleep
 		time.Sleep(150*time.Millisecond)
 	}
 }
@@ -443,6 +478,7 @@ func (rf *Raft) heartbeat() {
 		rf.mu.Lock()
 		term := rf.currentTerm
 		role := rf.role
+		commitIndex := rf.commitIndex
 		rf.mu.Unlock()
 
 		if role != Leader { // 如果不是leader, 退出
@@ -457,19 +493,20 @@ func (rf *Raft) heartbeat() {
 				continue
 			}
 			go func(server int){
-				rf.CallAppendEntries(server, term)
+				rf.CallAppendEntries(server, term, commitIndex)
 			}(server)
 		}
 		time.Sleep(150*time.Millisecond)
 	}
 }
 
-func(rf *Raft) CallAppendEntries(server int, term int) bool {
+func(rf *Raft) CallAppendEntries(server int, term int, commitIndex int) bool {
 	log.Printf("[%d] sending heartbeat to %d", rf.me, server)
 	// 调用 sendRequestVote 
 	args := AppendEntriesArgs{
 		Term : term,
 		LeaderId : rf.me,
+		LeaderCommit : commitIndex,
 	}
 	reply := AppendEntriesReply{}
 	ok := rf.sendAppendEntries(server, &args, &reply)
@@ -550,15 +587,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
+	rf.cond = sync.NewCond(&rf.mu)
 	rf.me = me
 	rf.currentTerm = 0
+	
 	// Initialize as follower
 	rf.role = Follower
-	rf.cond = sync.NewCond(&rf.mu)
 	// Initialize election timeout
 	rf.ResetLastReceiveRpcTime()
 	rf.ResetElectionTimeout()
-	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -36,6 +36,16 @@ go run -race mrworker.go wc.so
 
 ## Lab2
 - [**Lab2A**](https://github.com/Chen-Dixi/MIT6.824/blob/2A/src/raft/raft.go)
+
+```bash
+go test -run 2A -race
+```
+
 - **Lab2B**
+
+```bash
+go test -run 2B -race
+```
+
 - **Lab2C**
 - **Lab2D**
