@@ -144,7 +144,7 @@ func (rf *Raft) BecomeLeader() {
 	// initialize necessary variable
 	rf.role = Leader
 	rf.logmu.Lock()
-	lastLogIndexPlusOne := len(rf.logs) + 1
+	lastLogIndexPlusOne := rf.getLastLogIndex() + 1
 	rf.nextIndex = make([]int, len(rf.peers))
 	for server, _ := range rf.peers {
 		// Initialized to leader last log index + 1
@@ -180,7 +180,12 @@ func (rf *Raft) addLog(entry Entry) {
 	rf.logs = append(rf.logs, entry)
 }
 
+//
+// As illustrated in Figure 2, the first index of lgos is "1"
 func (rf *Raft) getLastLogIndex() int {
+	if len(rf.logs)==0 {
+		return 0;
+	}
 	return rf.logs[len(rf.logs)-1].Index
 }
 
@@ -330,7 +335,7 @@ func (rf *Raft) AttemptElection(){
 		if server == rf.me {
 			continue
 		}
-		go func(server int){
+		go func(server int) {
 			voteGranted := rf.CallSendRequestVote(server, term, lastLogIndex, lastLogTerm)
 			if !voteGranted {
 				return
@@ -476,6 +481,25 @@ func (rf *Raft) MoreUpToDate(lastLogIndex int, lastLogTerm int) bool {
 }
 
 //
+// true if the server is more up-to-date than the parameters
+func (rf *Raft) Match(prevLogIndex int, prevLogTerm int) bool {
+	// Though, We have had the mu lock hear, we still need logmu lock
+	if prevLogIndex == 0 {
+		return true
+	}
+	if (len(rf.logs) == 0) {
+		return false;
+	}
+
+	lastLogIndex := rf.getLastLogIndex()
+	if lastLogIndex < prevLogIndex {
+		return false
+	}
+	term := rf.getLogTerm(prevLogIndex)
+	return term == prevLogTerm
+}
+
+//
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -523,33 +547,55 @@ func (rf *Raft) replicateLog() {
 	// prevLogIndex, prevLogTerm 发给每个server的不一样
 	// LeaderCommit
 	rf.mu.Lock()
+	rf.logmu.Lock()
 	term := rf.currentTerm
 	role := rf.role
 	leaderCommit := rf.commitIndex
+	nextIndex := rf.nextIndex
+	rf.logmu.Unlock()
 	rf.mu.Unlock()
 
 	if role != Leader {
 		return
 	}
-
-	// 整个for循环希望能 锁住logs
-	rf.logmu.Lock()
+	
+	// replicate to all other servers
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
 		}
-		prevLogIndex := rf.nextIndex[server] - 1
-		prevLogTerm := rf.getLogTerm(prevLogIndex)
-		
-		entries := make([]Entry, 0)
-		for i:=prevLogIndex + 1; i < rf.getLastLogIndex(); i++ {
-			entries = append(entries, rf.getLog(i))
-		}
-		rf.CallAppendEntries(server, term, leaderCommit, entries, prevLogIndex, prevLogTerm)
+		go func(server int) {
+			for role == Leader{
+				prevLogIndex := nextIndex[server] - 1
+				prevLogTerm := rf.getLogTerm(prevLogIndex)
+				entries := make([]Entry, 0)
+				for i:=nextIndex[server]; i < rf.getLastLogIndex(); i++ {
+					entries = append(entries, rf.getLog(i))
+				}
+				replicated, replyTerm := rf.CallAppendEntries(server, term, leaderCommit, entries, prevLogIndex, prevLogTerm)
+				rf.mu.Lock()
+				if replyTerm > term { // RPC response contains term T > currentTerm, convert to follower
+					rf.MeetHigherTerm(replyTerm)
+					rf.mu.Unlock()
+					return;
+				}
 
+				if !replicated {
+					nextIndex[server] = nextIndex[server] - 1
+					role = rf.role
+					rf.mu.Unlock()
+					continue
+				}
+				
+				rf.matchIndex[server] = prevLogIndex + len(entries)
+				rf.nextIndex[server] = prevLogIndex + len(entries) + 1
+				rf.mu.Unlock()
+				break
+			}
+		} (server)
 	}
 
-	rf.logmu.Unlock()
+	
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -621,7 +667,7 @@ func(rf *Raft) CallAppendEntriesHeartBeat(server int, term int) bool {
 	return reply.Success
 }
 
-func(rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entries []Entry, prevLogIndex int, prevLogTerm int) bool {
+func(rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entries []Entry, prevLogIndex int, prevLogTerm int) (bool, int) {
 	log.Printf("[%d] sending heartbeat to %d", rf.me, server)
 	// 调用 sendRequestVote 
 	args := AppendEntriesArgs{
@@ -636,10 +682,10 @@ func(rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entries
 	reply := AppendEntriesReply{}
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	if ok == false {
-		return false
+		return false, 0
 	}
 
-	return reply.Success
+	return reply.Success, reply.Term
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -651,29 +697,74 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Heartbeats
 func(rf *Raft) AppendEntries(args *AppendEntriesArgs , reply *AppendEntriesReply) {
 	// Heartbeat if args.Entries is empty; AppendEntries otherwise
-	log.Printf("[%d] received heart beat from %d", rf.me, args.LeaderId)
-	// receive heart beats, update the time
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm {
-		reply.Success = false
+	if len(args.Entries) == 0{
+		log.Printf("[%d] received heart beat from %d", rf.me, args.LeaderId)
+		// receive heart beats, update the time
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		if args.Term < rf.currentTerm {
+			reply.Success = false
+			reply.Term = rf.currentTerm
+			return
+		}
+
+		if args.Term > rf.currentTerm {
+			rf.MeetHigherTerm(args.Term)
+		} else {
+			rf.MeetLeaderWinCurrentTerm(args.LeaderId, args.Term)
+		}
+
+		rf.ResetElectionTimeout()
+		rf.ResetLastReceiveRpcTime()
+		reply.Success = true
 		reply.Term = rf.currentTerm
-		return
-	}
-
-	if args.Term > rf.currentTerm {
-		rf.MeetHigherTerm(args.Term)
 	} else {
-		rf.MeetLeaderWinCurrentTerm(args.LeaderId, args.Term)
-	}
+		log.Printf("[%d] received append entries from %d", rf.me, args.LeaderId)
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 
-	rf.ResetElectionTimeout()
-	rf.ResetLastReceiveRpcTime()
-	reply.Success = true
-	reply.Term = rf.currentTerm
+		if args.Term < rf.currentTerm {
+			reply.Success = false
+			reply.Term = rf.currentTerm
+			return
+		}
+
+		if args.Term > rf.currentTerm {
+			rf.MeetHigherTerm(args.Term)
+		} else {
+			rf.MeetLeaderWinCurrentTerm(args.LeaderId, args.Term)
+		}
+
+		// Reply false if don't have match log
+		rf.logmu.Lock()
+		defer rf.logmu.Unlock()
+		if !rf.Match(args.PrevLogIndex, args.PrevLogTerm){
+			reply.Success = false
+			reply.Term = rf.currentTerm
+			return
+		}
+
+		// 覆盖
+		rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
+
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
+		}
+		rf.ResetElectionTimeout()
+		rf.ResetLastReceiveRpcTime()
+		reply.Success = true
+		reply.Term = rf.currentTerm
+	}
 }
 
+func Min(x, y int) int {
+    if x < y {
+        return x
+    }
+    return y
+}
 
 
 //
