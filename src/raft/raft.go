@@ -499,6 +499,11 @@ func (rf *Raft) Match(prevLogIndex int, prevLogTerm int) bool {
 	return term == prevLogTerm
 }
 
+func (rf *Raft) TakeNewEntryes(prevLogIndex int, []Entry entries) {
+	i := prevLogIndex + 1
+	len := len(rf.logs)
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -536,7 +541,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 	
 	// Your code here (2B).
-	log.Printf("[%d] start aggreement with term:[%d] ", rf.me, term)
+	log.Printf("[%d] start aggreement with term:[%d] and index:[%d] ", rf.me, term, index)
 	
 	go rf.replicateLog()
 
@@ -746,7 +751,7 @@ func(rf *Raft) AppendEntries(args *AppendEntriesArgs , reply *AppendEntriesReply
 			return
 		}
 
-		// 覆盖
+		// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
 		rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
 
 		if args.LeaderCommit > rf.commitIndex {
