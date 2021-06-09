@@ -192,6 +192,9 @@ func (rf *Raft) getLastLogIndex() int {
 
 func (rf *Raft) getLogTerm(index int) int {
 	//DPrintf("[getLogTerm] %v logs=%+v, index=%v", rf.me, rf.logs, index)
+	if index == 0 {
+		return 0
+	}
 	offset := rf.logs[0].Index
 	return rf.logs[index-offset].Term
 }
@@ -251,7 +254,7 @@ func (rf *Raft) Match(prevLogIndex int, prevLogTerm int) bool {
 	return term == prevLogTerm
 }
 
-func (rf *Raft) TakeNewEntryes(prevLogIndex int, entries []Entry) {
+func (rf *Raft) TakeNewEntries(prevLogIndex int, entries []Entry) {
 	i := 0
 	if prevLogIndex!=0 {
 		i = rf.getIndexFromZero(prevLogIndex)+1
@@ -489,7 +492,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// This is a rpc HANDLER!!!!!!
 	// TBD not sure if locking here is decent
 	// Implement Atomic
-	log.Printf("[%d] received request vote from %d", rf.me, args.CandidateId)
+	log.Printf("[%d] received request vote from [%d](Term:%d)", rf.me, args.CandidateId, args.Term)
 	rf.mu.Lock() // 不可重入
 	defer rf.mu.Unlock()
 
@@ -546,8 +549,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	log.Printf("Try call start on:[%d] ", rf.me)
 	rf.mu.Lock()
-	rf.logmu.Lock()
+	log.Printf("Get mu lock on:[%d] ", rf.me)
+	
+	
 	// TBD
 	index := len(rf.logs) + 1
 	term := rf.currentTerm
@@ -562,29 +568,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   index,
 	}
 	// involve the addLog action in the Lock Block
-	rf.addLog(entry)
+	
 
-	rf.logmu.Unlock()
 	rf.mu.Unlock()
 
 	// Your code here (2B).
 	log.Printf("[%d] start aggreement with term:[%d] and index:[%d] ", rf.me, term, index)
 
-	go rf.replicateLog()
+	go rf.replicateLog(entry)
 
 	return index, term, isLeader
 }
 
-func (rf *Raft) replicateLog() {
+func (rf *Raft) replicateLog(entry Entry) {
 	// prevLogIndex, prevLogTerm 发给每个server的不一样
 	// LeaderCommit
 	rf.mu.Lock()
-	rf.logmu.Lock()
+	rf.addLog(entry)
 	term := rf.currentTerm
 	role := rf.role
 	leaderCommit := rf.commitIndex
-	nextIndex := rf.nextIndex
-	rf.logmu.Unlock()
 	rf.mu.Unlock()
 
 	if role != Leader {
@@ -598,12 +601,15 @@ func (rf *Raft) replicateLog() {
 		}
 		go func(server int) {
 			for role == Leader {
-				prevLogIndex := nextIndex[server] - 1
+				rf.mu.Lock()
+				prevLogIndex := rf.nextIndex[server] - 1
 				prevLogTerm := rf.getLogTerm(prevLogIndex)
 				entries := make([]Entry, 0)
-				for i := nextIndex[server]; i < rf.getLastLogIndex(); i++ {
+				for i := rf.nextIndex[server]; i <= rf.getLastLogIndex(); i++ {
 					entries = append(entries, rf.getLog(i))
 				}
+				log.Printf("RPC: prevLogIndex:[%d] prevLogTerm:[%d] entries_size:[%d]",prevLogIndex, prevLogTerm, len(entries))
+				rf.mu.Unlock()
 				replicated, replyTerm := rf.CallAppendEntries(server, term, leaderCommit, entries, prevLogIndex, prevLogTerm)
 				rf.mu.Lock()
 				if replyTerm > term { // RPC response contains term T > currentTerm, convert to follower
@@ -613,8 +619,8 @@ func (rf *Raft) replicateLog() {
 				}
 
 				if !replicated {
-					nextIndex[server] = nextIndex[server] - 1
-					if nextIndex[server] <= 0 {
+					rf.nextIndex[server] = prevLogIndex
+					if rf.nextIndex[server] <= 0 {
 						rf.mu.Unlock()
 						return
 					}
@@ -622,7 +628,7 @@ func (rf *Raft) replicateLog() {
 					rf.mu.Unlock()
 					continue
 				}
-
+				log.Printf("[%d] go success AppendEntry reply from %d", rf.me, server)
 				rf.matchIndex[server] = prevLogIndex + len(entries)
 				rf.nextIndex[server] = prevLogIndex + len(entries) + 1
 				rf.mu.Unlock()
@@ -703,7 +709,7 @@ func (rf *Raft) CallAppendEntriesHeartBeat(server int, term int) bool {
 }
 
 func (rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entries []Entry, prevLogIndex int, prevLogTerm int) (bool, int) {
-	log.Printf("[%d] sending heartbeat to %d", rf.me, server)
+	log.Printf("[%d] sending append entries to %d in term:[%d]", rf.me, server, term)
 	// 调用 sendRequestVote
 	args := AppendEntriesArgs{
 		Term:         term,
@@ -734,11 +740,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Heartbeat if args.Entries is empty; AppendEntries otherwise
 
 	if len(args.Entries) == 0 {
-		log.Printf("[%d] received heart beat from %d", rf.me, args.LeaderId)
+		
 		// receive heart beats, update the time
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-
+		log.Printf("[%d] received heart beat from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
 		if args.Term < rf.currentTerm {
 			reply.Success = false
 			reply.Term = rf.currentTerm
@@ -756,10 +762,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		reply.Term = rf.currentTerm
 	} else {
-		log.Printf("[%d] received append entries from %d", rf.me, args.LeaderId)
+		
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-
+		log.Printf("[%d] received append entries from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
 		if args.Term < rf.currentTerm {
 			reply.Success = false
 			reply.Term = rf.currentTerm
@@ -782,7 +788,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
-		rf.TakeNewEntryes(args.PrevLogIndex, args.Entries)
+		rf.TakeNewEntries(args.PrevLogIndex, args.Entries)
+		log.Printf("[%d] Take New Entries from %d, now has %d entires", rf.me, args.LeaderId, len(rf.logs))
 
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
