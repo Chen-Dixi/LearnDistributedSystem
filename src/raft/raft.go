@@ -205,6 +205,9 @@ func (rf *Raft) getLog(index int) Entry {
 	return rf.logs[index-offset]
 }
 
+//
+//	offset := rf.logs[0].Index
+//	return index-offset
 func (rf *Raft) getIndexFromZero(index int) int {
 	offset := rf.logs[0].Index
 	return index-offset
@@ -653,6 +656,7 @@ func (rf *Raft) checkCommitTask(term int) {
 		role := rf.role
 		lastLogIndex := rf.getLastLogIndex()
 		leaderCommitIndex := rf.commitIndex
+		lastAppliedIndex := rf.lastApplied
 		matchIndex := rf.matchIndex
 		
 		if role != Leader {
@@ -669,10 +673,13 @@ func (rf *Raft) checkCommitTask(term int) {
 		// Binary Search
 		left := leaderCommitIndex + 1
 		right := lastLogIndex
-		count ++
+		count++
 		log.Printf("[%d] start the %d the Binary Search in term:[%d]", rf.me, count, term)
 		for left <= right {
-			mid := (left+right) / 2
+			mid := (left + right) / 2
+			
+			// If there exists an N such that N > commitIndex, 
+			// a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 			if rf.getLogTerm(mid) == term {
 				match := 0
 				for server, _ := range rf.peers {
@@ -687,7 +694,7 @@ func (rf *Raft) checkCommitTask(term int) {
 				if match > len(rf.peers) / 2 {
 					log.Printf("[%d] commitIndex update to %d in term:[%d] as Leader", rf.me, mid, term)
 					rf.commitIndex = mid
-					for i := leaderCommitIndex + 1; i<=mid; i++ {
+					for i := lastAppliedIndex + 1; i<=mid; i++ {
 						msg := ApplyMsg{
 							CommandValid : true,
 							Command : rf.getLog(i).Command,
@@ -696,6 +703,7 @@ func (rf *Raft) checkCommitTask(term int) {
 						log.Printf("[applyLog] %v apply msg=%+v", rf.me, msg)
 						rf.applyCh <- msg
 					}
+					rf.lastApplied = mid
 					break
 				} else {
 					right--
@@ -830,8 +838,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.MeetLeaderWinCurrentTerm(args.LeaderId, args.Term)
 		}
 
-		// TBD 这里的逻辑有问题，不能在这里直接提交
-		if args.LeaderCommit > rf.commitIndex {
+		// args.Term & args.LeaderCommit
+		if args.LeaderCommit > rf.commitIndex && rf.Match(args.LeaderCommit, args.Term){
 			oldCommitIndex := rf.commitIndex
 			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
 			log.Printf("[%d] commitIndex update to %d in term:[%d] as Follower", rf.me, rf.commitIndex, rf.currentTerm)
@@ -883,10 +891,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log.Printf("[%d] Take New Entries from %d, now has %d entires", rf.me, args.LeaderId, len(rf.logs))
 
 		if args.LeaderCommit > rf.commitIndex {
-			oldCommitIndex := rf.commitIndex
-			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
+			rf.commitIndex = Min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
+			lastAppliedIndex := rf.lastApplied
 			log.Printf("[%d] commitIndex update to %d in term:[%d] as Follower", rf.me, rf.commitIndex, rf.currentTerm)
-			for i := oldCommitIndex + 1; i<=rf.commitIndex; i++ {
+			for i := lastAppliedIndex + 1; i<=rf.commitIndex; i++ {
 				msg := ApplyMsg{
 					CommandValid : true,
 					Command : rf.getLog(i).Command,
@@ -895,6 +903,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				log.Printf("[%d] apply msg=%+v as Follower", rf.me, msg)
 				rf.applyCh <- msg
 			}
+			rf.lastApplied = rf.commitIndex
 		}
 		
 		rf.ResetElectionTimeout()
