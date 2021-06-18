@@ -182,7 +182,7 @@ func (rf *Raft) addLog(entry Entry) {
 }
 
 //
-// As illustrated in Figure 2, the first index of lgos is "1"
+// As illustrated in Figure 2, the first index of logs is "1"
 // 0 if logs is empty
 func (rf *Raft) getLastLogIndex() int {
 	if len(rf.logs) == 0 {
@@ -262,6 +262,7 @@ func (rf *Raft) TakeNewEntries(prevLogIndex int, entries []Entry) {
 	}
 	j := 0
 
+	// Append any new entries not already in the log
 	for ; i<len(rf.logs) && j < len(entries); {
 		if rf.logs[i].Index != entries[j].Index || rf.logs[j].Term != rf.logs[j].Term {
 			break
@@ -817,6 +818,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		defer rf.mu.Unlock()
 		log.Printf("[%d] received heart beat from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
 		if args.Term < rf.currentTerm {
+			// Reply false if term < currentTerm (§5.1)
 			reply.Success = false
 			reply.Term = rf.currentTerm
 			return
@@ -828,6 +830,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.MeetLeaderWinCurrentTerm(args.LeaderId, args.Term)
 		}
 
+		// TBD 这里的逻辑有问题，不能在这里直接提交
 		if args.LeaderCommit > rf.commitIndex {
 			oldCommitIndex := rf.commitIndex
 			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
@@ -868,12 +871,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.logmu.Lock()
 		defer rf.logmu.Unlock()
 		if !rf.Match(args.PrevLogIndex, args.PrevLogTerm) {
+			// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 			reply.Success = false
 			reply.Term = rf.currentTerm
 			return
 		}
 
-		// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
+		// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+		// Append any new entries not already in the log
 		rf.TakeNewEntries(args.PrevLogIndex, args.Entries)
 		log.Printf("[%d] Take New Entries from %d, now has %d entires", rf.me, args.LeaderId, len(rf.logs))
 
