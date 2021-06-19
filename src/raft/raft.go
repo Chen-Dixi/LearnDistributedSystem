@@ -122,7 +122,6 @@ func (rf *Raft) MeetHigherTerm(term int) {
 //
 // rf.role = Follower
 func (rf *Raft) MeetLeaderWinCurrentTerm(leaderId int, term int) {
-	// TBD, not sure here
 	if rf.votedFor == -1 {
 		rf.votedFor = leaderId
 	}
@@ -495,7 +494,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// This is a rpc HANDLER!!!!!!
-	// TBD not sure if locking here is decent
 	// Implement Atomic
 	log.Printf("[%d] received request vote from [%d](Term:%d)", rf.me, args.CandidateId, args.Term)
 	rf.mu.Lock() // 不可重入
@@ -556,7 +554,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	log.Printf("Try start on:[%d] ", rf.me)
 	rf.mu.Lock()
-	// TBD
 	index := len(rf.logs) + 1
 	term := rf.currentTerm
 	isLeader := rf.role == Leader
@@ -600,7 +597,7 @@ func (rf *Raft) replicateLog(term int, entry Entry) {
 			continue
 		}
 		go func(server int) {
-			for role == Leader {
+			for role == Leader { // TBD: Here is potential data race
 				rf.mu.Lock()
 				prevLogIndex := rf.nextIndex[server] - 1
 				prevLogTerm := rf.getLogTerm(prevLogIndex)
@@ -608,7 +605,7 @@ func (rf *Raft) replicateLog(term int, entry Entry) {
 				for i := rf.nextIndex[server]; i <= rf.getLastLogIndex(); i++ {
 					entries = append(entries, rf.getLog(i))
 				}
-				log.Printf("RPC: prevLogIndex:[%d] prevLogTerm:[%d] entries_size:[%d]",prevLogIndex, prevLogTerm, len(entries))
+				log.Printf("[Leader %d] send AppendEntriesRPC: prevLogIndex:[%d] prevLogTerm:[%d] entries_size:[%d]", rf.me, prevLogIndex, prevLogTerm, len(entries))
 				rf.mu.Unlock()
 				replicated, replyTerm := rf.CallAppendEntries(server, term, leaderCommit, entries, prevLogIndex, prevLogTerm)
 				rf.mu.Lock()
@@ -631,7 +628,7 @@ func (rf *Raft) replicateLog(term int, entry Entry) {
 					continue
 				}
 
-				log.Printf("[%d] got success AppendEntry reply from %d in term:[%d]", rf.me, server, term)
+				log.Printf("[Follower %d] got success AppendEntry reply from %d in term:[%d]", rf.me, server, term)
 				if term != rf.currentTerm || rf.role != Leader {
 					rf.mu.Unlock()
 					return
@@ -674,7 +671,7 @@ func (rf *Raft) checkCommitTask(term int) {
 		left := leaderCommitIndex + 1
 		right := lastLogIndex
 		count++
-		log.Printf("[%d] start the %d the Binary Search in term:[%d]", rf.me, count, term)
+		log.Printf("[CheckCommitTask][Leader %d] start the %dth Binary Search in term:[%d]", rf.me, count, term)
 		for left <= right {
 			mid := (left + right) / 2
 			
@@ -692,18 +689,20 @@ func (rf *Raft) checkCommitTask(term int) {
 					}
 				}
 				if match > len(rf.peers) / 2 {
-					log.Printf("[%d] commitIndex update to %d in term:[%d] as Leader", rf.me, mid, term)
+					log.Printf("[CheckCommitTask][Leader: %d] commitIndex update from %d to %d in term:[%d]", rf.me, leaderCommitIndex, mid, term)
 					rf.commitIndex = mid
+					appliedCmd := make([]interface{}, 0)
 					for i := lastAppliedIndex + 1; i<=mid; i++ {
 						msg := ApplyMsg{
 							CommandValid : true,
 							Command : rf.getLog(i).Command,
 							CommandIndex : i,
 						}
-						log.Printf("[applyLog] %v apply msg=%+v", rf.me, msg)
+						appliedCmd = append(appliedCmd, rf.getLog(i).Command)
 						rf.applyCh <- msg
 					}
 					rf.lastApplied = mid
+					log.Printf("[CheckCommitTask][Leader: %d] apply logs: [%v]", rf.me, appliedCmd)
 					break
 				} else {
 					right--
@@ -721,7 +720,6 @@ func (rf *Raft) checkCommitTask(term int) {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	// TBD
 	for rf.killed() == false {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -790,7 +788,7 @@ func (rf *Raft) CallAppendEntriesHeartBeat(server int, term int, leaderCommit in
 }
 
 func (rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entries []Entry, prevLogIndex int, prevLogTerm int) (bool, int) {
-	log.Printf("[%d] sending append entries to %d in term:[%d]", rf.me, server, term)
+	log.Printf("[Follwer %d] sending append entries to %d in term:[%d]", rf.me, server, term)
 	// 调用 sendRequestVote
 	args := AppendEntriesArgs{
 		Term:         term,
@@ -824,7 +822,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// receive heart beats, update the time
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		log.Printf("[%d] received heart beat from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
+		log.Printf("[HeartbeatRPC][%d] received heart beat from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
 		if args.Term < rf.currentTerm {
 			// Reply false if term < currentTerm (§5.1)
 			reply.Success = false
@@ -839,19 +837,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		// args.Term & args.LeaderCommit
-		if args.LeaderCommit > rf.commitIndex && rf.Match(args.LeaderCommit, args.Term){
+		if args.LeaderCommit > rf.commitIndex {
 			oldCommitIndex := rf.commitIndex
 			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
-			log.Printf("[%d] commitIndex update to %d in term:[%d] as Follower", rf.me, rf.commitIndex, rf.currentTerm)
+			log.Printf("[HeartbeatRPC][Follower %d] commitIndex update from %d to %d in term:[%d]", rf.me, oldCommitIndex, rf.commitIndex, rf.currentTerm)
+			appliedCmd := make([]interface{}, 0)
 			for i := oldCommitIndex + 1; i<=rf.commitIndex; i++ {
 				msg := ApplyMsg{
 					CommandValid : true,
 					Command : rf.getLog(i).Command,
 					CommandIndex : i,
 				}
-				log.Printf("[%d] apply msg=%+v as Follower", rf.me, msg)
+				appliedCmd = append(appliedCmd, rf.getLog(i).Command)
 				rf.applyCh <- msg
 			}
+			log.Printf("[HeartbeatRPC][Follower: %d] apply logs: [%v]", rf.me, appliedCmd)
 		}
 
 		rf.ResetElectionTimeout()
@@ -862,7 +862,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		log.Printf("[%d] received append entries from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
+		log.Printf("[AppendEntryRPC][Follower %d] received append entries from [Leader %d] in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
 		if args.Term < rf.currentTerm {
 			reply.Success = false
 			reply.Term = rf.currentTerm
@@ -888,21 +888,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 		// Append any new entries not already in the log
 		rf.TakeNewEntries(args.PrevLogIndex, args.Entries)
-		log.Printf("[%d] Take New Entries from %d, now has %d entires", rf.me, args.LeaderId, len(rf.logs))
+		log.Printf("[Follower %d] Take New Entries from [Leader %d], now has %d entires", rf.me, args.LeaderId, len(rf.logs))
 
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = Min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
 			lastAppliedIndex := rf.lastApplied
-			log.Printf("[%d] commitIndex update to %d in term:[%d] as Follower", rf.me, rf.commitIndex, rf.currentTerm)
+			log.Printf("[AppendEntryRPC][Follower %d] commitIndex update to %d in term:[%d] as Follower", rf.me, rf.commitIndex, rf.currentTerm)
+			appliedCmd := make([]interface{}, 0)
 			for i := lastAppliedIndex + 1; i<=rf.commitIndex; i++ {
 				msg := ApplyMsg{
 					CommandValid : true,
 					Command : rf.getLog(i).Command,
 					CommandIndex : i,
 				}
-				log.Printf("[%d] apply msg=%+v as Follower", rf.me, msg)
+				appliedCmd = append(appliedCmd, rf.getLog(i).Command)
 				rf.applyCh <- msg
 			}
+			log.Printf("[AppendEntryRPC][Follower: %d] apply logs: [%v]", rf.me, appliedCmd)
 			rf.lastApplied = rf.commitIndex
 		}
 		
