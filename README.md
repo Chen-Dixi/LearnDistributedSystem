@@ -41,7 +41,7 @@ go run -race mrworker.go wc.so
 go test -run 2A -race
 ```
 
-- **Lab2B**
+- [**Lab2B**](https://github.com/Chen-Dixi/MIT6.824/blob/2B/src/raft/raft.go)
 
 ```bash
 go test -run 2B -race

@@ -266,15 +266,29 @@ func (rf *Raft) TakeNewEntries(prevLogIndex int, entries []Entry) {
 
 	// Append any new entries not already in the log
 	for ; i<len(rf.logs) && j < len(entries); {
-		if rf.logs[i].Index != entries[j].Index || rf.logs[j].Term != rf.logs[j].Term {
+		if rf.logs[i].Index != entries[j].Index || rf.logs[i].Term != entries[j].Term {
 			break
 		}
 
 		i++
 		j++
 	}
+
+	
+	if (j == len(entries)) {
+		// The if here is crucial. If the follower has all the entries the leader sent, 
+		// the follower MUST NOT truncate its log. 
+		return
+	}
+	
+	// Any elements following the entries sent by the leader MUST be kept.
+	// we could be receiving an **outdated AppendEntries RPC from the leader, 
+	// and truncating the log would mean “taking back” entries that we may have 
+	// already told the leader that we have in our log.
 	rf.logs = append(rf.logs[:i], entries[j:]...)
+	log.Printf("[AppenEntry:TakeNewEntries][Follower %d] resulted logs:%v", rf.me, rf.logs)
 }
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -362,6 +376,10 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int
 	Entries      []Entry
 	LeaderCommit int
+
+	// help the follower to find the last index of New Entries,
+	// used in Headbeat RPC Handler
+	MatchIndex   int
 }
 
 type AppendEntriesReply struct {
@@ -431,7 +449,8 @@ func (rf *Raft) AttemptElection() {
 			rf.BecomeLeader()
 			rf.mu.Unlock()
 			go rf.heartbeat()
-		}(server)
+			go rf.checkCommitTask(term)
+		} (server)
 	}
 }
 
@@ -500,6 +519,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
+		log.Printf("[RV:smallTerm] %d reject the RV from %d, term:[%d] > [%d]", rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		reply.VoteGranted = false
 		// for candidate to update itself
 		reply.Term = rf.currentTerm
@@ -508,7 +528,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// when receiving any rpc request with term larger than current turn
 	if args.Term > rf.currentTerm {
-		// mutex是不可重入的锁
 		// step down first
 		rf.MeetHigherTerm(args.Term) // votedFor = -1; role = Follower; currentTerm = args.term
 	}
@@ -517,6 +536,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		// election restriction,
 		if rf.MoreUpToDate(args.LastLogIndex, args.LastLogTerm) {
+			log.Printf("[RV:UpToDate] %d reject the RV from %d, Candidate is not MoreUpToDate", rf.me, args.CandidateId)
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 			return
@@ -568,23 +588,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 		Index:   index,
 	}
+	rf.addLog(entry)
 	rf.mu.Unlock()
 
 	// Your code here (2B).
-	log.Printf("[%d] start aggreement with term:[%d] and index:[%d] ", rf.me, term, index)
-
-	go rf.replicateLog(term, entry)
-	go rf.checkCommitTask(term)
+	log.Printf("[Start][Leader %d] Start cmd [%v] with term:[%d] and index:[%d] ", rf.me, command, term, index)
+	// Check the index of Logs in concurrent situation
+	
+	go rf.replicateLog(term)
 	return index, term, isLeader
 }
 
-func (rf *Raft) replicateLog(term int, entry Entry) {
+func (rf *Raft) replicateLog(term int) {
 	// prevLogIndex, prevLogTerm 发给每个server的不一样
 	// LeaderCommit
 	rf.mu.Lock()
-	rf.addLog(entry)
 	role := rf.role
 	leaderCommit := rf.commitIndex
+	log.Printf("[ReplicateLog:checkLogs][Leader %d] term:[%d] rf.Logs:%v", rf.me, term, rf.logs)
 	rf.mu.Unlock()
 
 	if role != Leader {
@@ -597,16 +618,20 @@ func (rf *Raft) replicateLog(term int, entry Entry) {
 			continue
 		}
 		go func(server int) {
-			for role == Leader { // TBD: Here is potential data race
+			for rf.killed() == false { // TBD: Here is potential data race
 				rf.mu.Lock()
 				prevLogIndex := rf.nextIndex[server] - 1
 				prevLogTerm := rf.getLogTerm(prevLogIndex)
+				role := rf.role
 				entries := make([]Entry, 0)
 				for i := rf.nextIndex[server]; i <= rf.getLastLogIndex(); i++ {
 					entries = append(entries, rf.getLog(i))
 				}
-				log.Printf("[Leader %d] send AppendEntriesRPC: prevLogIndex:[%d] prevLogTerm:[%d] entries_size:[%d]", rf.me, prevLogIndex, prevLogTerm, len(entries))
 				rf.mu.Unlock()
+				if role != Leader {
+					break
+				}
+				log.Printf("[Leader %d] send AppendEntriesRPC to %d: prevLogIndex:[%d] prevLogTerm:[%d] entries_size:[%d]", rf.me, server, prevLogIndex, prevLogTerm, len(entries))
 				replicated, replyTerm := rf.CallAppendEntries(server, term, leaderCommit, entries, prevLogIndex, prevLogTerm)
 				rf.mu.Lock()
 				if replyTerm > term { // RPC response contains term T > currentTerm, convert to follower
@@ -623,19 +648,21 @@ func (rf *Raft) replicateLog(term int, entry Entry) {
 						rf.mu.Unlock()
 						return
 					}
-					role = rf.role
+					
 					rf.mu.Unlock()
 					continue
 				}
 
-				log.Printf("[Follower %d] got success AppendEntry reply from %d in term:[%d]", rf.me, server, term)
+				log.Printf("[Leader %d] got success AppendEntry reply from %d in term:[%d]", rf.me, server, term)
 				if term != rf.currentTerm || rf.role != Leader {
 					rf.mu.Unlock()
 					return
 				}
-
-				rf.matchIndex[server] = prevLogIndex + len(entries)
-				rf.nextIndex[server] = prevLogIndex + len(entries) + 1
+				
+				// TestConcurrentStarts2B shows us a concurrent situation
+				// the reply may be outdated, so I use Max function
+				rf.matchIndex[server] = Max(rf.matchIndex[server], prevLogIndex + len(entries))
+				rf.nextIndex[server] = Max(rf.nextIndex[server], prevLogIndex + len(entries) + 1)
 				
 				rf.mu.Unlock()
 				break
@@ -671,7 +698,7 @@ func (rf *Raft) checkCommitTask(term int) {
 		left := leaderCommitIndex + 1
 		right := lastLogIndex
 		count++
-		log.Printf("[CheckCommitTask][Leader %d] start the %dth Binary Search in term:[%d]", rf.me, count, term)
+		log.Printf("[CheckCommitTask][Leader: %d] start the %dth Binary Search in term:[%d]", rf.me, count, term)
 		for left <= right {
 			mid := (left + right) / 2
 			
@@ -748,6 +775,10 @@ func (rf *Raft) heartbeat() {
 		term := rf.currentTerm
 		role := rf.role
 		leaderCommit := rf.commitIndex
+		matchIndex := make([]int, len(rf.peers))
+		for server, _ := range rf.peers {
+			matchIndex[server] = rf.matchIndex[server]
+		}
 		rf.mu.Unlock()
 
 		if role != Leader { // 如果不是leader, 退出循环
@@ -762,20 +793,21 @@ func (rf *Raft) heartbeat() {
 				continue
 			}
 			go func(server int) {
-				rf.CallAppendEntriesHeartBeat(server, term, leaderCommit)
-			}(server)
+				rf.CallAppendEntriesHeartBeat(server, term, leaderCommit, matchIndex[server])
+			} (server)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 }
 
-func (rf *Raft) CallAppendEntriesHeartBeat(server int, term int, leaderCommit int) bool {
+func (rf *Raft) CallAppendEntriesHeartBeat(server int, term int, leaderCommit int, matchIndex int) bool {
 	log.Printf("[%d] sending heartbeat to %d", rf.me, server)
 	// 调用 sendRequestVote
 	args := AppendEntriesArgs{
 		Term:     term,
 		LeaderId: rf.me,
 		LeaderCommit : leaderCommit,
+		MatchIndex : matchIndex,
 	}
 
 	reply := AppendEntriesReply{}
@@ -788,7 +820,7 @@ func (rf *Raft) CallAppendEntriesHeartBeat(server int, term int, leaderCommit in
 }
 
 func (rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entries []Entry, prevLogIndex int, prevLogTerm int) (bool, int) {
-	log.Printf("[Follwer %d] sending append entries to %d in term:[%d]", rf.me, server, term)
+	log.Printf("[Leader %d] sending append entries to %d in term:[%d]", rf.me, server, term)
 	// 调用 sendRequestVote
 	args := AppendEntriesArgs{
 		Term:         term,
@@ -817,12 +849,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Heartbeats
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Heartbeat if args.Entries is empty; AppendEntries otherwise
-
 	if len(args.Entries) == 0 {
 		// receive heart beats, update the time
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		log.Printf("[HeartbeatRPC][%d] received heart beat from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
+		log.Printf("[HeartbeatRPC][Follower %d] received heart beat from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
 		if args.Term < rf.currentTerm {
 			// Reply false if term < currentTerm (§5.1)
 			reply.Success = false
@@ -839,7 +870,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// args.Term & args.LeaderCommit
 		if args.LeaderCommit > rf.commitIndex {
 			oldCommitIndex := rf.commitIndex
-			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
+
+			// it needs to be computed with the index of the last new entry.
+			// If leaderCommit is beyond the entries the leader sent you, 
+			// you may apply incorrect entries
+			rf.commitIndex = Max(rf.commitIndex, Min(args.LeaderCommit, args.MatchIndex))
 			log.Printf("[HeartbeatRPC][Follower %d] commitIndex update from %d to %d in term:[%d]", rf.me, oldCommitIndex, rf.commitIndex, rf.currentTerm)
 			appliedCmd := make([]interface{}, 0)
 			for i := oldCommitIndex + 1; i<=rf.commitIndex; i++ {
@@ -879,6 +914,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.logmu.Lock()
 		defer rf.logmu.Unlock()
 		if !rf.Match(args.PrevLogIndex, args.PrevLogTerm) {
+			log.Printf("[AppendEntryRPC:NotMatch][Follower %d] reject Leader %d, PrevLogIndex:[%d], PrevLogTerm:[%d]", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 			// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 			reply.Success = false
 			reply.Term = rf.currentTerm
@@ -891,9 +927,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log.Printf("[Follower %d] Take New Entries from [Leader %d], now has %d entires", rf.me, args.LeaderId, len(rf.logs))
 
 		if args.LeaderCommit > rf.commitIndex {
+			oldCommitIndex := rf.commitIndex
 			rf.commitIndex = Min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
 			lastAppliedIndex := rf.lastApplied
-			log.Printf("[AppendEntryRPC][Follower %d] commitIndex update to %d in term:[%d] as Follower", rf.me, rf.commitIndex, rf.currentTerm)
+			log.Printf("[AppendEntryRPC][Follower %d] commitIndex update from %d to %d in term:[%d]", rf.me, oldCommitIndex, rf.commitIndex, rf.currentTerm)
 			appliedCmd := make([]interface{}, 0)
 			for i := lastAppliedIndex + 1; i<=rf.commitIndex; i++ {
 				msg := ApplyMsg{
@@ -917,6 +954,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func Min(x, y int) int {
 	if x < y {
+		return x
+	}
+	return y
+}
+
+func Max(x, y int) int {
+	if x > y {
 		return x
 	}
 	return y
