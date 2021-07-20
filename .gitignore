@@ -3,3 +3,5 @@
 *.pdf
 .vscode/
 mr-out*
+
+.DS_Store
