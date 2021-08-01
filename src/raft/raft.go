@@ -65,7 +65,7 @@ type Entry struct {
 //
 type Raft struct {
     mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	logmu     sync.Mutex
+
 	cond      *sync.Cond          //
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
@@ -73,7 +73,7 @@ type Raft struct {
 	dead      int32               // set by Kill()
 	applyCh   chan ApplyMsg
 
-	role RaftServerRole
+	role uint32
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -116,7 +116,7 @@ func (rf *Raft) MeetHigherTerm(term int) {
 	rf.currentTerm = term
 	// reset votedFor
 	rf.votedFor = -1
-	rf.role = Follower
+	atomic.StoreUint32(&rf.role, Follower)
 }
 
 //
@@ -125,25 +125,14 @@ func (rf *Raft) MeetLeaderWinCurrentTerm(leaderId int, term int) {
 	if rf.votedFor == -1 {
 		rf.votedFor = leaderId
 	}
-	rf.role = Follower
-}
-
-func (rf *Raft) VoteFor(term int, candidateId int) {
-	rf.UpdateTermAndState(term, Follower)
-	rf.votedFor = candidateId
-}
-
-func (rf *Raft) UpdateTermAndState(term int, role RaftServerRole) {
-	rf.currentTerm = term
-	rf.role = role
+	atomic.StoreUint32(&rf.role, Follower)
 }
 
 //
 // become leader
 func (rf *Raft) BecomeLeader() {
 	// initialize necessary variable
-	rf.role = Leader
-	rf.logmu.Lock()
+	atomic.StoreUint32(&rf.role, Leader)
 	lastLogIndexPlusOne := rf.getLastLogIndex() + 1
 	rf.nextIndex = make([]int, len(rf.peers))
 	for server, _ := range rf.peers {
@@ -151,7 +140,6 @@ func (rf *Raft) BecomeLeader() {
 		rf.nextIndex[server] = lastLogIndexPlusOne
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.logmu.Unlock()
 }
 
 //
@@ -162,9 +150,9 @@ func (rf *Raft) ResetLastReceiveRpcTime() { // 重新计时
 
 //
 // 设置一个随机超时时间，
-// 500~700 ms
+// 500~756 ms
 func (rf *Raft) ResetElectionTimeout() { // 重新制定 timeout 时长
-	rf.electionTimeout = time.Duration((rand.Int63n(200) + 500)) * time.Millisecond
+	rf.electionTimeout = time.Duration((rand.Int63n(256) + 500)) * time.Millisecond
 }
 
 //
@@ -173,6 +161,7 @@ func (rf *Raft) IsElectionTimeout() bool {
 	// 判断有没有 超过
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	
 	return time.Since(rf.lastRpcTime) > rf.electionTimeout
 }
 
@@ -213,9 +202,8 @@ func (rf *Raft) getIndexFromZero(index int) int {
 }
 
 //
-// true if the server is more up-to-date than the parameters
+// true if the server is more up-to-date than the candidate
 func (rf *Raft) MoreUpToDate(lastLogIndex int, lastLogTerm int) bool {
-	// Though, We have had the mu lock hear, we still need logmu lock
 	// if this server have empty logs, he can vote for anyone
 	if len(rf.logs) == 0 {
 		return false 
@@ -226,8 +214,8 @@ func (rf *Raft) MoreUpToDate(lastLogIndex int, lastLogTerm int) bool {
 		return term > lastLogTerm
 	}
 
-	// if same term, the lastLogIndex need to >= len(rf.logs) - 1
-	return len(rf.logs) > lastLogIndex
+	// if same term, the lastLogIndex need to >= len(rf.logs)
+	return lastLogIndex < len(rf.logs)
 }
 
 func (rf *Raft) haveIndex(logIndex int) bool {
@@ -387,24 +375,39 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-type RaftServerRole string
+type RaftServerRole uint32
 
 const (
-	Follower  RaftServerRole = "Follower"
-	Candidate RaftServerRole = "Candidate"
-	Leader    RaftServerRole = "Leader"
+	Follower  uint32 = 1
+	Candidate uint32 = 2
+	Leader    uint32 = 3
 )
+
+func roleString (role uint32) string {
+	// Follower  RaftServerRole = 1"Follower"
+	// Candidate RaftServerRole = 2"Candidate"
+	// Leader    RaftServerRole = 3"Leader"
+	switch role {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	default:
+		return "Unkown"
+	}
+}
 
 func (rf *Raft) AttemptElection() {
 	// 创建 local variable 记录 自己的票数
 	// 在这个函数里，通过发送rpc请求，确定自己是否能成为Learder
 	// Update shared viriables
 	rf.mu.Lock()
-	rf.logmu.Lock()
 	// increment currentTerm
 	rf.currentTerm++
 	// convert to candidate
-	rf.role = Candidate
+	atomic.StoreUint32(&rf.role, Candidate)
 	// vote for self
 	rf.votedFor = rf.me
 	log.Printf("[%d] attempting an election at term %d", rf.me, rf.currentTerm)
@@ -421,7 +424,6 @@ func (rf *Raft) AttemptElection() {
 	if lastLogIndex > 0 {
 		lastLogTerm = rf.getLogTerm(lastLogIndex)
 	}
-	rf.logmu.Unlock()
 	rf.mu.Unlock()
 
 	for server, _ := range rf.peers {
@@ -445,7 +447,7 @@ func (rf *Raft) AttemptElection() {
 			if rf.role != Candidate || rf.currentTerm != term {
 				return
 			}
-			log.Printf("[%d] we got enough votes, we are now the leader (currentTerm=%d, state=%v)!", rf.me, rf.currentTerm, rf.role)
+			log.Printf("[%d] we got enough votes, we are now the leader (currentTerm=%d, state=%v)!", rf.me, rf.currentTerm, roleString(rf.role))
 			rf.BecomeLeader()
 			rf.mu.Unlock()
 			go rf.heartbeat()
@@ -690,7 +692,7 @@ func (rf *Raft) checkCommitTask(term int) {
 		
 		if lastLogIndex <= leaderCommitIndex { // already update commitIndex
 			rf.mu.Unlock()
-			time.Sleep(150 * time.Millisecond)
+			time.Sleep(130 * time.Millisecond)
 			continue
 		}
 
@@ -741,7 +743,7 @@ func (rf *Raft) checkCommitTask(term int) {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(130 * time.Millisecond)
 	}
 }
 // The ticker go routine starts a new election if this peer hasn't received
@@ -751,18 +753,19 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		rf.mu.Lock()
-		role := rf.role
-		rf.mu.Unlock()
-		if role == Leader {
-			time.Sleep(150 * time.Millisecond) // Leader don't have to check timeout
+		
+		// the use of atomic avoids the need for a lock.
+		isLeader := rf.isLeader()
+		sleepTime := time.Duration((rand.Int63n(64) + 64)) * time.Millisecond
+		if isLeader {
+			time.Sleep(sleepTime) // Leader don't have to check timeout
 			continue
 		}
 
 		if rf.IsElectionTimeout() {
 			rf.AttemptElection()
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(sleepTime)
 	}
 }
 
@@ -853,7 +856,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// receive heart beats, update the time
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		log.Printf("[HeartbeatRPC][Follower %d] received heart beat from %d in term:[%d]", rf.me, args.LeaderId, rf.currentTerm)
+		log.Printf("[HeartbeatRPC][Follower %d] received heart beat from %d with term:[%d]", rf.me, args.LeaderId, args.Term)
 		if args.Term < rf.currentTerm {
 			// Reply false if term < currentTerm (§5.1)
 			reply.Success = false
@@ -911,8 +914,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		// Reply false if don't have match log
-		rf.logmu.Lock()
-		defer rf.logmu.Unlock()
 		if !rf.Match(args.PrevLogIndex, args.PrevLogTerm) {
 			log.Printf("[AppendEntryRPC:NotMatch][Follower %d] reject Leader %d, PrevLogIndex:[%d], PrevLogTerm:[%d]", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 			// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
@@ -987,6 +988,10 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) isLeader() bool {
+	role := atomic.LoadUint32(&rf.role)
+	return role == Leader
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
