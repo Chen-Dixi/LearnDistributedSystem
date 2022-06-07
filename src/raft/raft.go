@@ -130,6 +130,7 @@ func (rf *Raft) MeetLeaderWinCurrentTerm(leaderId int, term int) {
 
 //
 // become leader
+// rf.role = Leader; initialize nextIndex and matchIndex
 func (rf *Raft) BecomeLeader() {
 	// initialize necessary variable
 	atomic.StoreUint32(&rf.role, Leader)
@@ -445,10 +446,12 @@ func (rf *Raft) AttemptElection() {
 			}
 			done = true
 			if rf.role != Candidate || rf.currentTerm != term {
+				rf.mu.Unlock()
+				log.Printf("[%d] we got enough votes, but not my term (currentTerm=%d, state=%v)!", rf.me, rf.currentTerm, roleString(rf.role))
 				return
 			}
-			log.Printf("[%d] we got enough votes, we are now the leader (currentTerm=%d, state=%v)!", rf.me, rf.currentTerm, roleString(rf.role))
 			rf.BecomeLeader()
+			log.Printf("[%d] we got enough votes, we are now the leader (currentTerm=%d, state=%v)!", rf.me, rf.currentTerm, roleString(rf.role))
 			rf.mu.Unlock()
 			go rf.heartbeat()
 			go rf.checkCommitTask(term)
