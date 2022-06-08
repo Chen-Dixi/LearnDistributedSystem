@@ -728,8 +728,14 @@ func (rf *Raft) replicateLog(term int) {
 					if rf.nextIndex[server] <= 0 {
 						rf.nextIndex[server] = 1
 					}
-					
+
 					rf.mu.Unlock()
+
+					if firstIndexOfTerm == -1 {
+						// server may crash
+						time.Sleep(130 * time.Millisecond)
+					}
+					
 					continue
 				}
 
@@ -915,7 +921,7 @@ func (rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entrie
 	reply := AppendEntriesReply{}
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	if ok == false {
-		return false, 0, 0, 0
+		return false, 0, 0, -1
 	}
 
 	return reply.Success, reply.Term, reply.ConflictTerm, reply.FirstIndexOfTerm
