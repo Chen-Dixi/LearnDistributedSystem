@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"log"
 	"time"
 )
 
@@ -177,6 +178,7 @@ func (rf *Raft) replicateLog(term int, index int) {
 				// 现在还是leader的轮次，
 				if !replicated {
 					// TBD 🤔
+					log.Printf("[ReplicateLog Not_Replicated][Leader %d][Term %d] send follower %d: prevLogIndex %d replyIndex %d", rf.me, term, server, prevLogIndex, firstIndexOfTerm)
 					nextIndex[server] = firstIndexOfTerm - 1
 					if nextIndex[server] <= 0 {
 						nextIndex[server] = 1

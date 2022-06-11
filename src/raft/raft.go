@@ -71,7 +71,7 @@ type SnaphotInMem struct {
 //
 type Raft struct {
     mu        sync.Mutex          // Lock to protect shared access to this peer's state
-
+	rwmu	  sync.RWMutex
 	cond      *sync.Cond          //
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
