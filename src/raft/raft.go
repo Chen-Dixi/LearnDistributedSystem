@@ -70,9 +70,9 @@ type SnaphotInMem struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-    mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	rwmu	  sync.RWMutex
-	cond      *sync.Cond          //
+    // mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu	  sync.RWMutex		  // Lock to protect shared access to this peer's state
+	replicatorCond      []*sync.Cond          //
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -736,7 +736,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
-	rf.cond = sync.NewCond(&rf.mu)
+	rf.replicatorCond = make([]*sync.Cond, len(peers))
 	rf.me = me
 	rf.currentTerm = 0
 	rf.applyCh = applyCh
