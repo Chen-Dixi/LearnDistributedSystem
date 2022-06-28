@@ -103,6 +103,10 @@ type Raft struct {
 	// Timeout clock
 	lastRpcTime     time.Time
 	electionTimeout time.Duration
+
+	// Timer
+	heartbeatTimer	*time.Timer
+	electionTimer	*time.Timer
 }
 
 // return currentTerm and whether this server
@@ -548,7 +552,7 @@ func (rf *Raft) AttemptElection() {
 			rf.BecomeLeader()
 			DPrintf("[Peer %d] we got enough votes, we are now the leader (currentTerm=%d, state=%v)!", rf.me, rf.currentTerm, roleString(rf.role))
 			rf.mu.Unlock()
-			go rf.heartbeat()
+			// go rf.heartbeat_timer()
 			go rf.checkCommitTask(term)
 		} (server)
 	}
@@ -680,6 +684,12 @@ func (rf *Raft) ticker() {
 	}
 }
 
+// func (rf *Raft) ticker1() {
+// 	for rf.killed() == false {
+
+// 	}
+// }
+
 func Min(x, y int) int {
 	if x < y {
 		return x
@@ -745,13 +755,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Initialize election timeout
 	rf.ResetLastReceiveRpcTime()
 	rf.ResetElectionTimeout()
-
+	
+	rf.heartbeatTimer = time.NewTimer(150 * time.Millisecond)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	
 	rf.readSnapshot(persister.ReadSnapshot())
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
+	go rf.heartbeat_timer()
 	return rf
 }

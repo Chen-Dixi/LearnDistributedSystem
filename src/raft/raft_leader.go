@@ -364,6 +364,42 @@ func (rf *Raft) heartbeat() {
 	}
 }
 
+func (rf *Raft) heartbeat_timer() {
+	// rf.heatbeatTimer只在这里 Reset，所以可以使用 RLock
+	for rf.killed() == false {
+		<- rf.heartbeatTimer.C
+		rf.mu.RLock()
+		term := rf.currentTerm
+		role := rf.role
+		leaderCommit := rf.commitIndex
+		matchIndex := make([]int, len(rf.matchIndex))
+		
+		for server, _ := range rf.matchIndex {
+			matchIndex[server] = rf.matchIndex[server]
+		}
+		
+		rf.mu.RUnlock()
+		
+		if role != Leader { // 如果不是leader, 退出循环
+			DPrintf("[%d] is no longer Leader and stop sending heartbeat with term:[%d]", rf.me, term)
+			rf.heartbeatTimer.Reset(150 * time.Millisecond)
+			continue
+		}
+
+		DPrintf("[%d] starting heartbeat at term %d", rf.me, term)
+
+		for server, _ := range rf.peers {
+			if server == rf.me {
+				continue
+			}
+			go func(server int) {
+				rf.CallAppendEntriesHeartBeat(server, term, leaderCommit, matchIndex[server])
+			} (server)
+		}
+		rf.heartbeatTimer.Reset(150 * time.Millisecond)
+	}
+}
+
 // Leader send snapshots to followers that lag behind
 func (rf *Raft) CallInstallSnapshot(server int) (bool, int) {
 	args := InstallSnapshotArgs{
