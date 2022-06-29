@@ -152,12 +152,30 @@ func (rf *Raft) BecomeLeader() {
 	// initialize necessary variable
 	atomic.StoreUint32(&rf.role, Leader)
 	lastLogIndexPlusOne := rf.getLastLogIndex() + 1
+	// consider snapshot
+	if lastLogIndexPlusOne == 1 {
+		if haveSnapshot, snapshotLastIncludedIndex, _ := rf.haveSnapshot(); haveSnapshot {
+			lastLogIndexPlusOne = snapshotLastIncludedIndex + 1
+		}
+	}
+
 	rf.nextIndex = make([]int, len(rf.peers))
 	for server, _ := range rf.peers {
 		// Initialized to leader last log index + 1
 		rf.nextIndex[server] = lastLogIndexPlusOne
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
+	rf.heartbeatTimer.Reset(150 * time.Millisecond)
+	
+	for peer := range rf.peers {
+		if peer != rf.me{
+			go func(peer int){
+				rf.replicatorCond[peer].L.Lock()
+				rf.replicatorCond[peer].Signal()
+				rf.replicatorCond[peer].L.Unlock()
+			} (peer)
+		}
+	}
 }
 
 //
@@ -171,6 +189,7 @@ func (rf *Raft) ResetLastReceiveRpcTime() { // 重新计时
 // 500~756 ms
 func (rf *Raft) ResetElectionTimeout() { // 重新制定 timeout 时长
 	rf.electionTimeout = time.Duration((rand.Int63n(256) + 500)) * time.Millisecond
+	rf.electionTimer.Reset(time.Duration((rand.Int63n(256) + 500)) * time.Millisecond)
 }
 
 //
@@ -684,11 +703,28 @@ func (rf *Raft) ticker() {
 	}
 }
 
-// func (rf *Raft) ticker1() {
-// 	for rf.killed() == false {
+// The ticker go routine starts a new election if this peer hasn't received
+// heartsbeats recently using time.Timer
+func (rf *Raft) ticker1() {
+	for rf.killed() == false {
+		// Your code here to check if a leader election should
+		// be started and to randomize sleeping time using
+		// time.Sleep().
+		
+		// the use of atomic avoids the need for a lock.
+		<- rf.electionTimer.C
 
-// 	}
-// }
+		isLeader := rf.isLeader()
+		
+		if isLeader {
+			// time.Sleep(sleepTime) // Leader don't have to check timeout
+			rf.electionTimer.Reset(756 * time.Millisecond)
+			continue
+		}
+		
+		rf.AttemptElection()
+	}
+}
 
 func Min(x, y int) int {
 	if x < y {
@@ -743,26 +779,35 @@ func (rf *Raft) isLeader() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.replicatorCond = make([]*sync.Cond, len(peers))
-	rf.me = me
-	rf.currentTerm = 0
-	rf.applyCh = applyCh
-	// Initialize as follower
-	rf.role = Follower
+	rf := &Raft{
+		peers: peers,
+		persister: persister,
+		replicatorCond : make([]*sync.Cond, len(peers)),
+		me : me,
+		currentTerm : 0,
+		applyCh : applyCh,
+		// Initialize as follower
+		role : Follower,
+		// Initialize timer
+		electionTimer : time.NewTimer(time.Duration((rand.Int63n(256) + 500)) * time.Millisecond),
+		heartbeatTimer : time.NewTimer(150 * time.Millisecond),
+	}
+	
+	for peer, _ := range rf.peers {
+		if peer != me {
+			rf.replicatorCond[peer] = sync.NewCond(&sync.Mutex{})
+			go rf.replicator_backgroundTask(peer)
+		}
+	}
 	// Initialize election timeout
 	rf.ResetLastReceiveRpcTime()
 	rf.ResetElectionTimeout()
-	
-	rf.heartbeatTimer = time.NewTimer(150 * time.Millisecond)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	
 	rf.readSnapshot(persister.ReadSnapshot())
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	// go rf.ticker()
+	go rf.ticker1()
 	go rf.heartbeat_timer()
 	return rf
 }

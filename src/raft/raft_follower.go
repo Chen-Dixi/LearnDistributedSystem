@@ -346,5 +346,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lastApplied = rf.commitIndex
 	rf.persist()
 	DPrintf("[InstallSnapshot][Follower %d] receive snapshot from Leader %d, snapshotLastIncludedIndex %d, snapshotLastIncludedTerm %d", rf.me, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
-	return
+	
+	rf.ResetElectionTimeout()
+	rf.ResetLastReceiveRpcTime()
 }

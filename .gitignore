@@ -5,3 +5,4 @@
 mr-out*
 
 .DS_Store
+*.log
