@@ -34,20 +34,18 @@ func (rf *Raft) getFirstIndexStoreTheSameTerm(logIndex int) (int, int) {
 }
 
 // AppendEtries prevLogIndex, PrevLogTerm不匹配时，计算该返回给Leader的 Index
-func (rf *Raft) getAppendEntiresRejectionIndexAndTerm(prevLogIndex int, prevLogTerm int) (int, int) {
+func (rf *Raft) getAppendEntiresRejectionConflictIndexAndTerm(prevLogIndex int, prevLogTerm int) (int, int) {
 	// prevLogIndex 肯定大于0，否则不会执行次函数
 	// 返回的index 和 term 肯定是与leader不匹配的条目
 	haveSnapshot, snapshotLastIncludedIndex, snapshotLastIncludedTerm := rf.haveSnapshot()
 	
-	if haveSnapshot {
-		if len(rf.logs) == 0 {
-			return snapshotLastIncludedIndex + 1, snapshotLastIncludedTerm
-		}
+	if haveSnapshot && len(rf.logs) == 0 {
+		return snapshotLastIncludedIndex + 1, snapshotLastIncludedTerm
 	}
 
-	if !rf.haveLogIndex(prevLogIndex) {
-		// prevLogIndex 在rf.logs之外
-		return rf.getFirstLogIndex() + 1, 0
+	lastLogIndex := rf.getLastLogIndex()
+	if lastLogIndex < prevLogIndex {
+		return lastLogIndex + 1, 0
 	}
 
 	left := rf.getFirstLogIndex()
@@ -124,7 +122,6 @@ func (rf *Raft) TakeNewEntries(prevLogIndex int, entries []Entry) {
 	// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 	// Append any new entries not already in the log
 	rf.logs = append(rf.logs[:i], entries[j:]...)
-	DPrintf("[AppenEntry:TakeNewEntries][Follower %d] resulted logs:%v", rf.me, rf.logs)
 	// save Raft's persistent state to stable storage
 	rf.persist()
 }
@@ -181,8 +178,8 @@ func (rf *Raft) TakeNewEntriesConsideringSnapshot(prevLogIndex int, entries []En
 //
 // Receive heartbeats and log entries
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// Heartbeat if args.Entries is empty; AppendEntries otherwise
-	if len(args.Entries) == 0 {
+	// Heartbeat if args.PrevLogIndex is -1; AppendEntries otherwise
+	if args.PrevLogIndex == -1 {
 		// receive heart beats, update the time
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
@@ -255,7 +252,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Term = rf.currentTerm
 			// include the term of the conflicting entry and the first index it stores for that term
 			// reply.FirstIndexOfTerm, reply.ConflictTerm = rf.getFirstIndexStoreTheSameTerm(args.PrevLogIndex)
-			reply.FirstIndexOfTerm, reply.ConflictTerm = rf.getAppendEntiresRejectionIndexAndTerm(args.PrevLogIndex, args.PrevLogTerm)
+			reply.FirstIndexOfTerm, reply.ConflictTerm = rf.getAppendEntiresRejectionConflictIndexAndTerm(args.PrevLogIndex, args.PrevLogTerm)
 			return
 		}
 
@@ -269,7 +266,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			oldCommitIndex := rf.commitIndex
 			// considering snapshot
 			nextApplyIndex := Max(oldCommitIndex + 1, rf.getFirstLogIndex())
-			rf.commitIndex = Min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
+			rf.commitIndex = Min(args.LeaderCommit, rf.getLastLogIndex())
 			
 			DPrintf("[AppendEntryRPC][Follower %d] commitIndex update from %d to %d in term:[%d]", rf.me, oldCommitIndex, rf.commitIndex, rf.currentTerm)
 			appliedCmd := make([]interface{}, 0)

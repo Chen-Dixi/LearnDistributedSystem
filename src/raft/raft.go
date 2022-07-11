@@ -170,9 +170,9 @@ func (rf *Raft) BecomeLeader() {
 	for peer := range rf.peers {
 		if peer != rf.me{
 			go func(peer int){
-				rf.replicatorCond[peer].L.Lock()
+				// rf.replicatorCond[peer].L.Lock()
 				rf.replicatorCond[peer].Signal()
-				rf.replicatorCond[peer].L.Unlock()
+				// rf.replicatorCond[peer].L.Unlock()
 			} (peer)
 		}
 	}

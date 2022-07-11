@@ -40,6 +40,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   index,
 	}
 	rf.addLog(entry)
+	rf.persist()
 	rf.mu.Unlock()
 
 	// Your code here (2B).
@@ -50,9 +51,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	for peer := range rf.peers {
 		if peer != rf.me{
 			go func(peer int){
-				rf.replicatorCond[peer].L.Lock()
+				// rf.replicatorCond[peer].L.Lock()
 				rf.replicatorCond[peer].Signal()
-				rf.replicatorCond[peer].L.Unlock()
+				// rf.replicatorCond[peer].L.Unlock()
 			} (peer)
 		}
 	}
@@ -130,17 +131,17 @@ func (rf *Raft) replicator_backgroundTask(server int) {
 		rf.mu.RUnlock()
 		if len(entries) == 0{
 			// unnecessary AE
-			
-			continue
+			DPrintf("[replicator_backgroundTask][Leader %d] emptry entries! term: %d follower %d, nextIndex %d", rf.me, term, server, rf.nextIndex[server])
 		}
+
 		DPrintf("[Leader %d] send AppendEntriesRPC to %d: prevLogIndex:[%d] prevLogTerm:[%d] entries_size:[%d]", rf.me, server, prevLogIndex, prevLogTerm, len(entries))
 		ok, replicated, replyTerm, _, firstIndexOfTerm := rf.CallAppendEntries(server, term, leaderCommit, entries, prevLogIndex, prevLogTerm)
 		rf.mu.Lock()
 
 		if !ok {
 			// sending rpc failed
+			DPrintf("[CallAppendEntries:Not_Ok][Leader %d] to [Follower %d] in term: %d", rf.me, server, term)
 			rf.mu.Unlock()
-			
 			continue
 		}
 
@@ -150,7 +151,7 @@ func (rf *Raft) replicator_backgroundTask(server int) {
 			rf.MeetHigherTerm(replyTerm)
 			rf.mu.Unlock()
 			
-			return
+			continue
 		}
 		
 		// 现在还是leader的轮次，
@@ -360,6 +361,8 @@ func (rf *Raft) CallAppendEntriesHeartBeat(server int, term int, leaderCommit in
 		LeaderId: rf.me,
 		LeaderCommit : leaderCommit,
 		MatchIndex : matchIndex,
+		PrevLogIndex: -1,
+		PrevLogTerm: -1,
 	}
 
 	reply := AppendEntriesReply{}
@@ -372,7 +375,7 @@ func (rf *Raft) CallAppendEntriesHeartBeat(server int, term int, leaderCommit in
 }
 
 func (rf *Raft) CallAppendEntries(server int, term int, leaderCommit int, entries []Entry, prevLogIndex int, prevLogTerm int) (bool, bool, int, int, int) {
-	DPrintf("[Leader %d] sending append entries to %d in term:[%d]", rf.me, server, term)
+	DPrintf("[CallAppendEntries][Leader %d] sending append entries to %d in term:[%d]", rf.me, server, term)
 	// 调用 sendRequestVote
 	args := AppendEntriesArgs{
 		Term:         term,
